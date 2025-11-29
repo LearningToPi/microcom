@@ -1,0 +1,50 @@
+{
+    "rp2-serial": {
+        "port": 1,
+        "baudrate": 115200,
+        "log_level": 7,
+        "ssid": "dunt11niot",
+        "security": "l3xugHFvKH7vY90ncDIC",
+        "security_mode": "wpa1-2"
+        
+    },
+    "rp2": {
+        "log_level": 7,
+        "stats_streaming": false,
+        "initial_config": [
+            {"msg_type": "bus_init", "data": {"bus_type": "i2c", "bus_id": 0, "sda_pin": 4, "scl_pin": 5, "freq": 400000, "hardware": true}},
+            {"msg_type": "display_init", "data": {"display_type": "ssd1306", "bus_type": "i2c", "bus_id": 0, "config": {"width": 128, "height": 64, "address": 60, "contrast": 255,
+             "row_configs": [
+                {"font": "robotomono", "style": "reg", "size": 16},
+                {"font": "robotomono", "style": "bold", "size": 24},
+                {"font": "robotomono", "style": "reg", "size": 24}
+             ],
+             "lines": [
+                {"text": "", "line": 0, "clear": true, "justify": "c", "wrap": false},
+                {"text": "", "line": 1, "clear": false, "justify": "c", "wrap": false},
+                {"text": "booting...", "line": 2, "clear": false, "justify": "c", "wrap": false}  
+             ]}}},
+             {"msg_type": "import_class", "data": {"path": "fireworks", "class_name": "FireworksController", "save_return": "fireworks", "init_params":{"display_id": 0, "config": {"sw1": 6, "sw2": 7, "sw3": 8, "sw4": 11, "sw5": 12, "btn": 9, "key": 13, "led1": 20, "led2": 18, "ledbtn": 15, "out1": 16, "out2": 27, "out3": 26, "out4": 17, "out5": 28}}}}
+        ]
+    },
+    "esp32": {
+        "log_level": 7,
+        "server": "ble",
+        "name": "Microcom BLE Test",
+        "stats_streaming": false,
+        "mitm_enabled": false,
+        "bond_enabled": false,
+        "secure_enabled": false,
+        "io_mode": "no_input_output"
+    },
+    "esp32-s3": {
+        "server": "wifi_udp",
+        "ssid": "dunt11niot",
+        "key": "l3xugHFvKH7vY90ncDIC",
+        "log_level": 7,
+        "stats_streaming": false,
+        "initial_config": [
+            {"msg_type": "neo_pixel_cmd", "data": {"neo1": {"cmd": "INIT", "kwargs": {"devices": [{"max_brightness": 25, "name": "47", "pin": 47, "count": 49}], "log_level": "info"}}}}
+        ]
+    }
+}
