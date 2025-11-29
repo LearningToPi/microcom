@@ -1,0 +1,6 @@
+bleak==2.0.0
+dbus-fast==3.1.2
+font_to_py==0.44.2
+freetype-py==2.5.1
+logging-handler==1.0.7
+pyserial==3.5
