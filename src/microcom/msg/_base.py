@@ -258,6 +258,12 @@ class MicrocomMsg:
         raise ValueError(f"Internal data field must contain bytes or bytearray, has data of type: {type(self._data)}")
    
     @property
+    def total_length(self) -> int:
+        ''' return the total length of the packet '''
+        header, data, footer = self.serialize()
+        return len(header + data + footer)
+
+    @property
     def data_length(self) -> int:
         ''' Return the number of bytes in the data field '''
         return len(self.data_bytes)
@@ -383,6 +389,9 @@ class MicrocomMsg:
     def __str__(self) -> str:
         ''' Return the packet as a str '''
         return str(self.dict(text=True))
+    
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}({', '.join([str(key) + '=' + str(val) for key, val in self.dict().items()])})"
 
     def __eq__(self, other) -> bool:
         ''' Check if packets match '''
