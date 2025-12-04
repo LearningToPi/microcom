@@ -559,6 +559,7 @@ class MicrocomServer:
         elif received_msg.direction == DIR_SEND_FRAG:
             # send an ACK
             asyncio.create_task(self.send_ack(message=received_msg))
+            await asyncio.sleep(.01)
             # if we received a fragment that isn't a reply save the data until all fragments received
             if isinstance(self._received_frag, MicrocomMsg) and self._received_frag.pkt_id == received_msg.pkt_id:
                 self._logger.debug(f"RECEIVED send fragment {received_msg.frag_number} for pkt: {self._received_frag.pkt_id}")
@@ -598,6 +599,7 @@ class MicrocomServer:
             if received_msg.msg_type == MSG_TYPE_PING:
                 # if we received a ping, return a message with the same ID and data payload
                 asyncio.create_task(self.send(MicrocomMsg.reply(received_msg)))
+                await asyncio.sleep(.1)
 
             elif received_msg.msg_type in self.MESSAGE_TYPE:
                 try:

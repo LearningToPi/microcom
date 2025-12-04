@@ -2,13 +2,13 @@
 import asyncio
 import gc
 import os
+import sys
 from gc import collect
 from time import time
 from bluetooth import BLE # pyright: ignore[reportMissingImports]
 from micropython import const  # type: ignore # pylint: disable=E0401
 import libs.aioble as aioble
 from libs.aioble.device import DeviceConnection
-from libs.aioble.security import load_secrets, _save_secrets
 from microcom.server import MicrocomServer
 from microcom.msg._base import MicrocomMsg, SER_START_HEADER, SER_END, DIR_REPLY_FRAG, TEXT_ENCODING, MSG_TYPE_STATS
 from microcom.async_lock import AsyncLock
@@ -41,8 +41,10 @@ BLE_SECRETS_PATH = 'ble_secrets.json'
 
 # Service definition UUID's
 _UART_SERVICE = bluetooth.UUID("6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
-_TX_CHARACTERISTIC = bluetooth.UUID("6E400003-B5A3-F393-E0A9-E50E24DCCA9E")
-_RX_CHARACTERISTIC = bluetooth.UUID("6E400002-B5A3-F393-E0A9-E50E24DCCA9E")
+_TX_CHARACTERISTIC = bluetooth.UUID("6E400003-B5A3-F393-E0A9-E50E24DCCA9E") # Write from server to client
+_TX_READ_CHARACTERISTIC = bluetooth.UUID("8d970003-4a06-41c9-91a8-88836a1531cd") # Client writes ID of last message read
+_RX_CHARACTERISTIC = bluetooth.UUID("6E400002-B5A3-F393-E0A9-E50E24DCCA9E") # Read from client to server
+_RX_READ_CHARACTERISTIC = bluetooth.UUID("8d970002-4a06-41c9-91a8-88836a1531cd") # Server writes ID of last message read
 
 
 class MicrocomServerBLE(MicrocomServer):
@@ -57,30 +59,22 @@ class MicrocomServerBLE(MicrocomServer):
         self.active_connection = None
         self.__ble_send_lock = AsyncLock()
 
-        # load secrets
-        self._logger.info(f"{self.__i} Loading secrets from {self.secrets_path}")
-        load_secrets(self.secrets_path)
-
         self._logger.info(f"{self.__i} Starting server with MITM: {self.mitm}, Bond: {self.bond}, LE Secure {self.le_secure}, IO Mode: {self.io_mode} ...")
 
-        # Configure the BLE Service
-        self.ble = BLE()
-        self.ble.active(True)
-        #self.ble.config(
-        #    io=IO_CAPABILITY_TEXT.index(self.io_mode),
-        #    mitm=self.mitm,
-        #    bond=self.bond,
-        #    le_secure=self.le_secure
-        #)
+        # configure BLE service
+        aioble.config(gap_name=self.name)
 
         # register the GATT server
         self._logger.info(f"{self.__i} Registering BLE GATT services")
         self.uart_service = aioble.Service(_UART_SERVICE)
         self.tx_characteristic = aioble.BufferedCharacteristic(service=self.uart_service, uuid=_TX_CHARACTERISTIC, read=True, write=False, notify=True, max_len=self.buffer_len, append=True)
+        self.tx_read_characteristic = aioble.BufferedCharacteristic(service=self.uart_service, uuid=_TX_READ_CHARACTERISTIC, read=False, write=True, notify=False, max_len=16, append=False)
         self.rx_characteristic = aioble.BufferedCharacteristic(service=self.uart_service, uuid=_RX_CHARACTERISTIC, read=False, write=True, notify=False, max_len=self.buffer_len, append=True)
+        self.rx_read_characteristic = aioble.BufferedCharacteristic(service=self.uart_service, uuid=_RX_READ_CHARACTERISTIC, read=True, write=False, notify=True, max_len=16, append=False)
         aioble.register_services(self.uart_service)
 
         # start receive and advertise loops
+        self._receive_message_task = asyncio.create_task(self._receive_ack_thread())
         self._receive_message_task = asyncio.create_task(self._receive_thread())
         self._advertise_loop_task = asyncio.create_task(self._advertise_loop())
 
@@ -118,17 +112,8 @@ class MicrocomServerBLE(MicrocomServer):
                 self._logger.error(f"{self.__i} Advertise loop error: {e.__class__.__name__}: {e}...")
 
     async def send_ack(self, message:MicrocomMsg, timeout:None|int=None, retry:None|int=None):
-        ''' Send ACK messages '''
-        if self.active_connection is not None:
-            async with self.__ble_send_lock:
-                try:
-                    header, data, footer = MicrocomMsg.ack(message=message).serialize()
-                    self._logger.debug(f"{self.__i} Sending ACK: {message.ip} {header}")
-                    self.tx_characteristic.write(header + data + footer, send_update=True)
-                except Exception as e:
-                    self._logger.error(f"{self.__i} Error sending ACK for {message.ip} {header}: {e.__class__.__name__}: {e}")
-        else:
-            self._logger.warning(f"{self.__i} No BLE connection active to send ACK for Message type: {message.msg_type}, id: {message.pkt_id}")
+        ''' Send ACK messages - ACK is handled during receiving for Bluetooth LE '''
+        pass
 
     async def send(self, message, timeout:None|int=None, retry:None|int=None, wait_for_ack:bool=True, wait_for_reply:bool=False, data=None):
         ''' Send a message back using the tx service '''
@@ -142,7 +127,7 @@ class MicrocomServerBLE(MicrocomServer):
                 # if we need to fragment, break up the packet and send
                 frag_count = 1
                 fragment = None
-                for fragment in message.frag(self.buffer_len):
+                for fragment in message.frag(self.buffer_len - (message.total_length - message.data_length)):
                     self._logger.debug(f"{self.__i} SEND fragment {frag_count} for pkt_id: {fragment.pkt_id} to ({fragment.ip}:{fragment.port}) size: {fragment.data_length}")
                     await self.send(fragment, timeout=timeout, retry=retry, wait_for_ack=wait_for_ack, wait_for_reply=wait_for_reply if message.direction != DIR_REPLY_FRAG else False)
                     if not fragment.ack_received():
@@ -169,9 +154,9 @@ class MicrocomServerBLE(MicrocomServer):
                     self._logger.error(f"{self.__i} Error sending message: {message}: {e.__class__.__name__}: {e}")
                     return
 
-                # if we aren't waiting for an ACK, then we don't need to retrans
-                if not wait_for_ack:
-                    return
+                # Must ALWAYS wait for ACK on BLE to prevent overwriting a previous message
+                #if not wait_for_ack:
+                #    return
 
                 while not message.ack_received() and time() < (message.send_time + timeout): # type: ignore
                     await asyncio.sleep(.1)
@@ -196,8 +181,27 @@ class MicrocomServerBLE(MicrocomServer):
         else:
             self._logger.warning(f"{self.__i} No BLE connection active to send ACK for Message type: {message.msg_type}, id: {message.pkt_id}")
 
+    async def _receive_ack_thread(self):
+        ''' Thread to process ACK messages from the TX_READ characteristic (client successfully read the message) '''
+        self._logger.info(f"{self.__i} Starting ACK receive loop...")
+        await asyncio.sleep(.01)
+        while True:
+            try:
+                gc.collect()
+                await self.tx_read_characteristic.written()
+                message_id = int(self.tx_read_characteristic.read().decode('utf-8'))
+                if self._last_sent_message.pkt_id == message_id:
+                    self._last_sent_message.ack_time = time()
+                    self._logger.debug(f"{self.__i} Received ACK for message ID: {message_id}")
+                else:
+                    self._logger.warning(f"{self.__i} Received ACK for message ID: {message_id}, does not match last sent packet id: {self._last_sent_message.pkt_id if self._last_sent_message is not None else None}")
+            except Exception as e:
+                self._logger.error(f"{self.__i} Error in receive ACK thread: {e.__class__.__name__}: {e}")
+                if self._logger.console_level == 7:
+                    sys.print_exception(e) # pyright: ignore[reportAttributeAccessIssue] # pylint: disable=E1101
+
     async def _receive_thread(self):
-        self._logger.info(f"{self.__i} Starting receive loop")
+        self._logger.info(f"{self.__i} Starting receive loop...")
         data = b''
         await asyncio.sleep(.01)
         while True:
@@ -211,11 +215,15 @@ class MicrocomServerBLE(MicrocomServer):
                 # check if start and end values present
                 if SER_START_HEADER in data and SER_END in data:
                     received_msg = MicrocomMsg.from_bytes(data, (self.active_connection.device.addr if self.active_connection is not None else None,))
+                    data = b''
                     self._logger.debug(f"{self.__i} Received message: {received_msg}")
+                    # set the last read message ID in the RX_READ characteristic so the client knows the read is complete
+                    self._logger.debug(f"{self.__i} Sending ACK for message ID: {received_msg.pkt_id}")
+                    self.rx_read_characteristic.write(str(received_msg.pkt_id).encode('utf-8'), send_update=True)
                     asyncio.create_task(self._receive_message(received_msg))
 
                 # make sure that the data starts with the start header
-                data = data[data.find(SER_START_HEADER):]
+                #data = data[data.find(SER_START_HEADER):]
 
                 # If the start header shows up a second time, drop everything before the 2nd start header (incomplete packet)
                 if SER_START_HEADER in data[len(SER_START_HEADER):]:
@@ -223,4 +231,7 @@ class MicrocomServerBLE(MicrocomServer):
 
             except asyncio.CancelledError:
                 self._logger.info(f"{self.__i} Stopping receive loop")
-        #return await super()._receive_message(received_msg)
+            except Exception as e:
+                self._logger.error(f"Error in receive loop: {e.__class__.__name__}: {e}")
+                if self._logger.console_level == 7:
+                    sys.print_exception(e) # pyright: ignore[reportAttributeAccessIssue] # pylint: disable=E1101
