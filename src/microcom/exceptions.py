@@ -62,3 +62,9 @@ class MicrocomDisplayException(MicrocomException):
 
 class MicrocomFontException(MicrocomException):
     ''' Exception loading or using fonts '''
+
+class MicrocomConnectFailed(MicrocomException):
+    ''' Exception when a failure to connect occurs '''
+
+class MicrocomDBusError(MicrocomException):
+    ''' Exception in the DBus connection to get/disconnect devices '''
