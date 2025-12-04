@@ -8,10 +8,10 @@ import hashlib
 import io
 from logging_handler import create_logger, INFO
 from typing import Callable
-from src.microcom.msg._base import *
-from src.microcom.exceptions import *
-from src.microcom.stats._base import *
-from src.microcom.utils import supported_hash_algs
+from microcom.msg._base import *
+from microcom.exceptions import *
+from microcom.stats._base import *
+from microcom.utils import supported_hash_algs
 from microcom.pin import *
 from microcom.pwm import *
 from microcom.gpio import MicrocomGPIO
@@ -90,6 +90,10 @@ class MicrocomClient:
             return self.ping(count=1, data=b'1', timeout=1, retry=0).get('success_rate', False) == True
         except Exception:
             return False
+
+    def is_connected(self) -> bool:
+        ''' Return True / False if connection is active - override as needed for different implementations, i.e. BLE is connected needs to be different than is_open '''
+        return self.is_open()
 
     def send(self, message:MicrocomMsg, wait_for_ack:bool=True, wait_for_reply:bool=False, timeout:None|int=None, retry:None|int=None) -> MicrocomMsg|None:
         ''' Serialize and send a microcom message. If not wait_for_reply returns none, otherwise returns the reply message
