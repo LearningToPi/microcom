@@ -6,7 +6,7 @@ import os
 import sys
 import hashlib
 import binascii
-from machine import reset, soft_reset, RTC # type: ignore # pylint: disable=E040
+from machine import reset, soft_reset, RTC # type: ignore # pylint: disable=E0401
 from gc import collect # type: ignore # pylint: disable=E0611
 
 from microcom.async_lock import AsyncLock
@@ -33,6 +33,7 @@ FILE_HASH_PREFERED = ['sha1', 'sha256']
 
 PWM = 'pwm'
 I2C = 'i2c'
+UART = 'uart'
 
 IRQ_COMMANDS = ('send_message', 'write_file', 'pin_set', 'bus_cmd', 'set_vars', 'create_byte_arr', 'pwm_set', 'reset', 'exec_func', 'platform_specific')
 
@@ -57,7 +58,7 @@ class MicrocomServer:
         self._logger.info(f"Microcom Starting, log level: {self._logger.console_level}...")
         self._stream_stats_client = stream_stats_client
         self.stream_stats = stats_streaming # start or stop the stats streaming
-        self._vars = {'i2c': {}, 'spi': {}, 'pwm': {}, 'saved':{}, 'platform': {}, 'irq': {}, 'display': {}}
+        self._vars = {'i2c': {}, 'spi': {}, 'pwm': {}, 'saved':{}, 'platform': {}, 'irq': {}, 'display': {}, 'uart': {}}
         self._byte_arr = {}
         self._worker_thread = WorkerThread(logger=self._logger, reply_func=self.send)
 
@@ -323,6 +324,11 @@ class MicrocomServer:
             self._vars['i2c'][str(message.data['bus_id'])] = MicrocomI2CBus(message.data, self._logger)
             # return a I2C bus scan
             return self._vars['i2c'][str(message.data['bus_id'])].exec(bus_cmd='scan')
+        elif message.data['bus_type'] == UART:
+            from microcom.uart import MicrocomUARTBus
+            self._vars['uart'][str(message.data['bus_id'])] = MicrocomUARTBus(message.data, self._logger)
+            # create async read task
+            self._vars['uart'][str(message.data['bus_id'])].read_thread = asyncio.create_task(self._vars['uart'][str(message.data['bus_id'])].async_read(callback=self.send, msg_class=MicrocomMsg))
         else:
             raise MicrocomException(f"Unable to initialize bus: {message.data}")
 
@@ -336,11 +342,14 @@ class MicrocomServer:
         for cmd in (commands if isinstance(commands, list) else [commands]):
             if not isinstance(cmd, dict):
                 raise ValueError(f"EXEC_BUS_CMD Expected a dict and got '{cmd}'")
-            if str(cmd['bus_type']).upper() == 'i2c':
+            if str(cmd['bus_type']).lower() == 'i2c':
                 if str(cmd['bus_id']) in self._vars['i2c']:
                     return_data.append(self._vars['i2c'][str(cmd['bus_id'])].exec(**cmd))
                 else:
                     raise MicrocomBusNotInitialized(f"EXEC_BUS_CMD {cmd['bus_type']} id {cmd['bus_id']} is not initialized")
+            elif str(cmd['bus_type']).lower() == 'uart':
+                if str(cmd['bus_id']) in self._vars['uart']:
+                    return_data.append(self._vars['uart'][str(cmd['bus_id'])].exec(**cmd))
             else:
                 raise MicrocomBusInvaldParam(f"EXEC_BUS_CMD Invalid bus type '{cmd['bus_type']}' provided. Platform supports {self.PLATFORM_SUPPORTED_BUSES}")
 
@@ -602,15 +611,19 @@ class MicrocomServer:
                 await asyncio.sleep(.1)
 
             elif received_msg.msg_type in self.MESSAGE_TYPE:
-                try:
-                    return_data = await asyncio.create_task(self.MESSAGE_FUNCTION[self.MESSAGE_TYPE.index(received_msg.msg_type)](received_msg))
-                    asyncio.create_task(self.send(MicrocomMsg.reply(received_msg, data=return_data)))
-                except Exception as e:
-                    err_msg = f"Error in {self.MESSAGE_FUNCTION[self.MESSAGE_TYPE.index(received_msg.msg_type)].__name__}({received_msg.data}): {e.__class__.__name__}: {e}"
-                    self._logger.error(err_msg)
-                    if self._logger.console_level == 7:
-                        sys.print_exception(e)  # pyright: ignore[reportAttributeAccessIssue] # pylint: disable=E1101
-                    asyncio.create_task(self.send(MicrocomMsg.reply(received_msg, data=err_msg, return_code=MICROCOM_FILE_ERROR if e.__class__.__name__ == 'OSError' else MICROCOM_GENERAL_ERROR)))
+                # if a timesync message, just run the sync
+                if received_msg.msg_type == MSG_TYPE_TIME_SYNC:
+                    asyncio.create_task(self.time_sync(received_msg))
+                else:
+                    try:
+                        return_data = await asyncio.create_task(self.MESSAGE_FUNCTION[self.MESSAGE_TYPE.index(received_msg.msg_type)](received_msg))
+                        asyncio.create_task(self.send(MicrocomMsg.reply(received_msg, data=return_data)))
+                    except Exception as e:
+                        err_msg = f"Error in {self.MESSAGE_FUNCTION[self.MESSAGE_TYPE.index(received_msg.msg_type)].__name__}({received_msg.data}): {e.__class__.__name__}: {e}"
+                        self._logger.error(err_msg)
+                        if self._logger.console_level == 7:
+                            sys.print_exception(e)  # pyright: ignore[reportAttributeAccessIssue] # pylint: disable=E1101
+                        asyncio.create_task(self.send(MicrocomMsg.reply(received_msg, data=err_msg, return_code=MICROCOM_FILE_ERROR if e.__class__.__name__ == 'OSError' else MICROCOM_GENERAL_ERROR)))
 
             elif received_msg.msg_type == MSG_TYPE_STATS_ENABLE:
                 self.stream_stats = False
@@ -649,6 +662,8 @@ async def get_file_checksum(path:str, alg_list:str|list|None=None) -> dict:
         raise NotImplementedError(f"Requested hashing algorithm {alg_list} not in supported list: {supported_algs}")
     alg = matching_algs[0]
 
+    collect()
+
     with open(path, 'rb') as input_file:
         file_hash = getattr(hashlib, alg)()
         in_buf = None
@@ -666,6 +681,7 @@ async def list_dir(path:str='/', subdirs:bool=True, checksums:bool=False) -> dic
     file_list = {}
     list_iter = os.ilistdir(path) # type: ignore # pylint: disable=E1101
     for x in list_iter:
+        collect()
         print(path, x)
         file_list[x[0]] = {
             'size': x[3],
