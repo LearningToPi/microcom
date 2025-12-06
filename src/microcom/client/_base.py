@@ -6,6 +6,7 @@ from typing import List, Dict
 import os
 import hashlib
 import io
+import json
 from logging_handler import create_logger, INFO
 from typing import Callable
 from microcom.msg._base import *
@@ -19,6 +20,7 @@ from microcom.i2c import MicrocomI2C
 from microcom.bmx280 import Bmx280I2C
 from microcom.pwm_in import MicrocomRP2PwmIn, MicrocomRP2TachIn
 from microcom.neo import MicrocomNeoPixel
+from microcom.uart import MicrocomUART
 
 SEND_QUEUE_MAX = 10
 RECEIVE_QUEUE_MAX = 10
@@ -331,10 +333,10 @@ class MicrocomClient:
             raise MicrocomRetryExceeded("Retry exceeded for messge.")
         if message.reply_msg.return_code == MICROCOM_GENERAL_ERROR:
             raise MicrocomException(f"General error occured on microcom server: {message.reply_msg.data}")
-        if message.reply_msg.return_code == MICROCOM_FILE_ERROR or not isinstance(message.reply_msg.data, dict):
+        if message.reply_msg.return_code == MICROCOM_FILE_ERROR:
             raise MicrocomFileNotFound(f"Path '{path}' not found")
         self._logger.debug(f"List dir response from server: {message.data}: {message.reply_msg.data}")
-        return message.reply_msg.data
+        return json.loads(message.reply_msg.data.decode('utf-8'))
 
     def get_checksum(self, remote:str, timeout:None|int=None, retry:None|int=None) -> dict:
         ''' Get the checksum of the file, returns None or raises an exception
@@ -472,6 +474,10 @@ class MicrocomClient:
     def get_neopixel_from_server(self, name:str, log_level=INFO) -> MicrocomNeoPixel:
         ''' return a neopixel object that already exists on the server '''
         return MicrocomNeoPixel.from_server(name=name, send=self.send, log_level=log_level)
+    
+    def get_uart(self, bus_id:int, tx:int, rx:int, baudrate:int, log_level:str=INFO, flow_control:bool=False, cts:int|None=None, rts:int|None=None) -> MicrocomUART:
+        ''' return a UART object '''
+        return MicrocomUART(bus_id=bus_id, tx=tx, rx=rx, send=self.send, baudrate=baudrate, message_class=MicrocomMsg, log_level=log_level, flow_control=flow_control, cts=cts, rts=rts)
 
     def bus_list(self) -> dict:
         ''' Get the list of initialized buses from the server '''
