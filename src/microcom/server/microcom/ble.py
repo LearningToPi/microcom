@@ -10,7 +10,7 @@ from micropython import const  # type: ignore # pylint: disable=E0401
 import libs.aioble as aioble
 from libs.aioble.device import DeviceConnection
 from microcom.server import MicrocomServer
-from microcom.msg._base import MicrocomMsg, SER_START_HEADER, SER_END, DIR_REPLY_FRAG, TEXT_ENCODING, MSG_TYPE_STATS
+from microcom.msg._base import MicrocomMsg, SER_START_HEADER, SER_END, DIR_REPLY_FRAG, TEXT_ENCODING, MSG_TYPE_TIME_SYNC
 from microcom.async_lock import AsyncLock
 from microcom.exceptions import *
 from microcom.log_manager import DEBUG
@@ -36,7 +36,8 @@ BLE_MITM_ENABLED = True
 BLE_BOND_ENABLED = True
 BLE_SECURE_ENABLED = True
 BLE_IO_MODE = 'display_code'
-BLE_BUFFER_LEN = 256
+BLE_BUFFER_LEN = 253
+BLE_GATT_OVERHEAD = 3
 BLE_SECRETS_PATH = 'ble_secrets.json'
 
 # Service definition UUID's
@@ -67,9 +68,9 @@ class MicrocomServerBLE(MicrocomServer):
         # register the GATT server
         self._logger.info(f"{self.__i} Registering BLE GATT services")
         self.uart_service = aioble.Service(_UART_SERVICE)
-        self.tx_characteristic = aioble.BufferedCharacteristic(service=self.uart_service, uuid=_TX_CHARACTERISTIC, read=True, write=False, notify=True, max_len=self.buffer_len, append=True)
+        self.tx_characteristic = aioble.BufferedCharacteristic(service=self.uart_service, uuid=_TX_CHARACTERISTIC, read=True, write=False, notify=True, max_len=self.buffer_len + BLE_GATT_OVERHEAD, append=True)
         self.tx_read_characteristic = aioble.BufferedCharacteristic(service=self.uart_service, uuid=_TX_READ_CHARACTERISTIC, read=False, write=True, notify=False, max_len=16, append=False)
-        self.rx_characteristic = aioble.BufferedCharacteristic(service=self.uart_service, uuid=_RX_CHARACTERISTIC, read=False, write=True, notify=False, max_len=self.buffer_len, append=True)
+        self.rx_characteristic = aioble.BufferedCharacteristic(service=self.uart_service, uuid=_RX_CHARACTERISTIC, read=False, write=True, notify=False, max_len=self.buffer_len + BLE_GATT_OVERHEAD, append=True)
         self.rx_read_characteristic = aioble.BufferedCharacteristic(service=self.uart_service, uuid=_RX_READ_CHARACTERISTIC, read=True, write=False, notify=True, max_len=16, append=False)
         aioble.register_services(self.uart_service)
 
@@ -120,6 +121,7 @@ class MicrocomServerBLE(MicrocomServer):
         if self.active_connection is not None:
             timeout = timeout if timeout is not None else self.send_timeout
             retry = retry if retry is not None else self.retry
+            wait_for_ack = True # need to enforce ACK's for BLE to prevent overwriting previous message
             if data is not None:
                 message.data = data # if data was passed to the function, fill it in
 
@@ -179,7 +181,7 @@ class MicrocomServerBLE(MicrocomServer):
                 self._logger.error(f"ID: {message.pkt_id} to ({message.ip}:{message.port}), Type: {message.msg_type}, Retry exceeded with no ACK. Message discarded.") # type: ignore
 
         else:
-            self._logger.warning(f"{self.__i} No BLE connection active to send ACK for Message type: {message.msg_type}, id: {message.pkt_id}")
+            self._logger.warning(f"{self.__i} No BLE connection active to send Message type: {message.msg_type}, id: {message.pkt_id}")
 
     async def _receive_ack_thread(self):
         ''' Thread to process ACK messages from the TX_READ characteristic (client successfully read the message) '''
@@ -190,6 +192,7 @@ class MicrocomServerBLE(MicrocomServer):
                 gc.collect()
                 await self.tx_read_characteristic.written()
                 message_id = int(self.tx_read_characteristic.read().decode('utf-8'))
+                self.tx_read_characteristic.write(b'0') # reset the value so we can be ready for the next
                 if self._last_sent_message.pkt_id == message_id:
                     self._last_sent_message.ack_time = time()
                     self._logger.debug(f"{self.__i} Received ACK for message ID: {message_id}")
@@ -217,9 +220,11 @@ class MicrocomServerBLE(MicrocomServer):
                     received_msg = MicrocomMsg.from_bytes(data, (self.active_connection.device.addr if self.active_connection is not None else None,))
                     data = b''
                     self._logger.debug(f"{self.__i} Received message: {received_msg}")
-                    # set the last read message ID in the RX_READ characteristic so the client knows the read is complete
-                    self._logger.debug(f"{self.__i} Sending ACK for message ID: {received_msg.pkt_id}")
-                    self.rx_read_characteristic.write(str(received_msg.pkt_id).encode('utf-8'), send_update=True)
+                    if received_msg.msg_type != MSG_TYPE_TIME_SYNC:
+                        # If a time sync message, dont send an ACK!
+                        # set the last read message ID in the RX_READ characteristic so the client knows the read is complete
+                        self._logger.debug(f"{self.__i} Sending ACK for message ID: {received_msg.pkt_id}")
+                        self.rx_read_characteristic.write(str(received_msg.pkt_id).encode('utf-8'), send_update=True)
                     asyncio.create_task(self._receive_message(received_msg))
 
                 # make sure that the data starts with the start header
