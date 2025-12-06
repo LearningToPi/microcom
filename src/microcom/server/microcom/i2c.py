@@ -4,6 +4,7 @@ from microcom._bus import MicrocomBus
 
 
 class MicrocomI2CBus(MicrocomBus):
+    BUS_TYPE = 'I2C'
     BUS_INIT_FIELDS = ('bus_id', 'sda_pin', 'scl_pin', 'freq', 'hardware')
     BUS_CMD_FIELDS = {
         'scan': (),
