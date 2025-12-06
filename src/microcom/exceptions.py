@@ -45,6 +45,9 @@ class MicrocomMessageDecodeError(MicrocomException):
 class MicrocomBusNotInitialized(MicrocomException):
     ''' Exception when attempting to access a bus that has not been initialized '''
 
+class MicrocomBusInitializationError(MicrocomException):
+    ''' Exception when attempting to initialize a bus '''
+
 class MicrocomBusDeviceNotFound(MicrocomException):
     ''' Exception when a requested device address is not found on a bus i.e. I2C '''
 
