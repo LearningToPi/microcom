@@ -147,7 +147,8 @@ class MicrocomMsg:
     _version = 0
 
     def __init__(self, direction=DIR_SEND, msg_type=MSG_TYPE_PING, data:object=None, return_code:int=0, crypto:int=CRYPTO_NONE,
-                 pkt_id:int|None=None, timestamp:int|None=None, retries:int=0, ip:str|None=None, port:int|None=None, frag_number:int=0):
+                 pkt_id:int|None=None, timestamp:int|None=None, retries:int=0, ip:str|None=None, port:int|None=None, frag_number:int=0,
+                 data_type:int|None=None):
         if direction not in SUPPORTED_DIR:
             raise MicrocomUnsupported(f"Unsupported direction '{direction}'. Must be from {SUPPORTED_DIR}")
         if isinstance(msg_type, str):
@@ -180,14 +181,19 @@ class MicrocomMsg:
         self._data = b'\x00'
         self._data_formatted = None
 
-        for x in range(len(DATA_SUPPORTED_FORMATS)): # pylint: disable=C0200
-            if isinstance(data, DATA_SUPPORTED_FORMATS[x]):
-                self.data_type = x
-                if not isinstance(data, bytearray):
-                    self._data = data_to_bytes(data, x)
-                else:
-                    self._data = data
-                break
+        # override the data type to account for fragments that get reset to bytes rather than retaining their original type
+        if data_type is not None:
+            self._data = data
+            self.data_type = data_type
+        else:
+            for x in range(len(DATA_SUPPORTED_FORMATS)): # pylint: disable=C0200
+                if isinstance(data, DATA_SUPPORTED_FORMATS[x]):
+                    self.data_type = x
+                    if not isinstance(data, bytearray):
+                        self._data = data_to_bytes(data, x)
+                    else:
+                        self._data = data
+                    break
 
         # if our data is not None and we are still set to DATA_NULL then raise an error
         if data is not None and self.data_type == DATA_NULL:
@@ -275,9 +281,9 @@ class MicrocomMsg:
         if self.data_type == DATA_NULL or self._data == b'\x00':
             return None
 
-        if DATA_SUPPORTED_FORMATS_TEXT[self.data_type] == 'json':
+        if DATA_SUPPORTED_FORMATS_TEXT[self.data_type] == 'json' and self.frag_number == 0:
             return json_reverse_fixup(loads(self._data.decode('utf-8')))
-        if DATA_SUPPORTED_FORMATS_TEXT[self.data_type] in ['bytes', 'bytearray']:
+        if DATA_SUPPORTED_FORMATS_TEXT[self.data_type] in ['bytes', 'bytearray'] or self.frag_number > 0:
             return self._data
         return DATA_SUPPORTED_FORMATS[self.data_type](self._data.decode('utf-8')) # type:ignore
 
@@ -364,7 +370,7 @@ class MicrocomMsg:
                     direction = self.direction
                 # if we are on the last fagment, need to send as a reply rather than a reply fragment
                 yield MicrocomMsg(direction=direction, msg_type=self.msg_type, return_code=self.return_code, crypto=self.crypto, pkt_id=self.pkt_id,
-                                data=data[(x-1)*size:(x-1)*size+size], ip=self.ip, port=self.port, frag_number=x)
+                                data=data[(x-1)*size:(x-1)*size+size], ip=self.ip, port=self.port, frag_number=x, data_type=self.data_type)
 
     def dict(self, text:bool=False) -> dict:
         ''' Return the packet as a dict object '''
