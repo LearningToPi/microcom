@@ -13,9 +13,9 @@ class MicrocomBus:
         self._config, self._logger = config, _logger
         for req_field in self.BUS_INIT_FIELDS:
             if req_field not in config:
-                raise MicrocomBusInvaldParam(f"I2C_INIT: Bus type I2C requires field: {req_field}, got {config}")
+                raise MicrocomBusInvaldParam(f"BUS_INIT: Bus type {self.BUS_TYPE} requires field: {req_field}, got {config}")
 
-        # create functions 
+        # create functions
 
     def exec(self, bus_cmd:str, **kwargs):
         ''' Execute a command on the bus '''
@@ -23,7 +23,7 @@ class MicrocomBus:
 
         # check that we have valid command and parameters for supported commands
         if bus_cmd not in self.BUS_CMD_FIELDS:
-            self._logger.error(f"{self.BUS_TYPE}_EXEC_CMD: bus command '{bus_cmd}' not supported. Supported list: {self.BUS_CMD_FIELDS.keys()}")
+            self._logger.error(f"{self.BUS_TYPE}_EXEC_CMD: {self.BUS_TYPE}{bus_id} command '{bus_cmd}' not supported. Supported list: {self.BUS_CMD_FIELDS.keys()}")
         for field in self.BUS_CMD_FIELDS[bus_cmd]:
             if field not in kwargs:
                 self._logger.error(f"{self.BUS_TYPE}_EXEC_CMD: message missing field {field}, got {kwargs}")
@@ -31,10 +31,10 @@ class MicrocomBus:
 
         # check that the command exists in the selected object
         if bus_cmd not in dir(self._bus): # type: ignore
-            self._logger.error(f"{self.BUS_TYPE}_EXEC_CMD: Bus {bus_id} does not support {bus_cmd}")
-            raise NotImplementedError(f"{self.BUS_TYPE}_EXEC_CMD: Bus {bus_id} does not support {bus_cmd}")
+            self._logger.error(f"{self.BUS_TYPE}_EXEC_CMD: {self.BUS_TYPE}{bus_id} does not support {bus_cmd}")
+            raise NotImplementedError(f"{self.BUS_TYPE}_EXEC_CMD: {self.BUS_TYPE}{bus_id} does not support {bus_cmd}")
 
         # execute the command
-        self._logger.debug(f"{self.BUS_TYPE}_EXEC_CMD: Executing I2C{bus_id} {bus_cmd}: {kwargs}")
+        self._logger.debug(f"{self.BUS_TYPE}_EXEC_CMD: Executing {self.BUS_TYPE}{bus_id} {bus_cmd}: {kwargs}")
         cmd_func = getattr(self._bus, bus_cmd)
         return cmd_func(*[kwargs[x] for x in self.BUS_CMD_FIELDS[bus_cmd]])
