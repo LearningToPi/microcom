@@ -3,7 +3,7 @@ import esp32 # pylint: disable=E0401
 from microcom.gpio import GPIO_GLOBAL_CONSTANTS
 
 # Global platform variables
-PLATFORM_SUPPORTED_BUSES = ('i2c',)
+PLATFORM_SUPPORTED_BUSES = ('i2c', 'uart')
 PLATFORM_SUPPORTED_FUNCTIONS = ()
 
 PLATFORM_SUPPORTED_IRQ_FUNCTIONS = ()
