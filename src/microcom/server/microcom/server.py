@@ -594,6 +594,7 @@ class MicrocomServer:
                 self._received_frag = received_msg
                 self._received_frag.frag_time = time()
         else:
+
             # if this wasn't an ACK or Time sync, send back an ACK
             if received_msg.msg_type != MSG_TYPE_TIME_SYNC:
                 asyncio.create_task(self.send_ack(message=received_msg))
@@ -604,6 +605,12 @@ class MicrocomServer:
                 self._received_frag.append_data(received_msg.data)
                 received_msg = self._received_frag
                 self._received_frag = None
+                # reset the frag count back to 0, allows the packet to type cast the data
+                if received_msg.frag_number > 0:
+                    self._logger.debug(f"Resetting frag count for packet id: {received_msg.pkt_id} from {received_msg.frag_number} to 0")
+                    received_msg.frag_number = 0
+                    print(received_msg)
+
 
             if received_msg.msg_type == MSG_TYPE_PING:
                 # if we received a ping, return a message with the same ID and data payload

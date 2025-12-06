@@ -300,7 +300,6 @@ class MicrocomMsg:
         ''' Convert the data to bytes and append it to the existing data '''
         for x in range(len(DATA_SUPPORTED_FORMATS)): # pylint: disable=C0200
             if isinstance(data, DATA_SUPPORTED_FORMATS[x]):
-                self.data_type = x
                 self._data += data_to_bytes(data, x)
                 break
 
