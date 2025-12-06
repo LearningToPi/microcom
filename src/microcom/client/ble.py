@@ -24,7 +24,7 @@ BLE_DEVICE_NAME = 'Microcom Server'
 BLE_CONNECT_TIMEOUT = 10
 BLE_PAIR_DEVICE = True
 BLE_RE_MAC = r'^[0-9a-fA-F]{2}[:_-]?[0-9a-fA-F]{2}[:_-]?[0-9a-fA-F]{2}[:_-]?[0-9a-fA-F]{2}[:_-]?[0-9a-fA-F]{2}[:_-]?[0-9a-fA-F]{2}$'
-BLE_GATT_CHAR_MAX_WRITE_LENGTH = 256
+BLE_GATT_CHAR_MAX_WRITE_LENGTH = 256 - 3
 BLE_GATT_CHAR_RX_UUID = '6e400003-b5a3-f393-e0a9-e50e24dcca9e'
 BLE_GATT_CHAR_RX_READ_UUID = "8d970003-4a06-41c9-91a8-88836a1531cd" # Client writes ID of last message read
 BLE_GATT_CHAR_TX_UUID = '6e400002-b5a3-f393-e0a9-e50e24dcca9e'
@@ -52,9 +52,10 @@ class MicrocomClientBLE(MicrocomClient):
         self._ble_send_queue = None
         # DBus holders
         self._dbus, self._dbus_proxy, self._dbus_obj_manager = None, None, None
-        self.__ble_send_lock = Lock()
+        self.__ble_send_lock = asyncio.Lock()
         super().__init__(receive_queue_max, send_queue_max, log_level, name, send_timeout, retry, stats_interval, stats_history, receive_callback)
         self._request_close = False
+        self.__async_loop = None
         self._async_thread = Thread(target=asyncio.run, args=(self.__async_thread(),))
         self._async_thread.start()
 
@@ -155,6 +156,7 @@ class MicrocomClientBLE(MicrocomClient):
     async def __async_thread(self):
         ''' Asyncio function to run in a thread '''
         back_off_count = 0 # used to increment the backoff interval
+        self.__async_loop = asyncio.get_running_loop()
 
         while True:
             try:
@@ -204,7 +206,6 @@ class MicrocomClientBLE(MicrocomClient):
                         if isinstance(self._ble_send_queue, dict):
                             self._logger.debug(f"Bluetooth Nordic UART Transmit: {self._ble_send_queue}")
                             await cl.write_gatt_char(**self._ble_send_queue)
-                            # clear the message to notify the send is complete
                             self._ble_send_queue = None
                         await asyncio.sleep(BLE_SEND_CHECK_INTERVAL)
 
@@ -223,7 +224,7 @@ class MicrocomClientBLE(MicrocomClient):
 
     def close(self):
         # close the current running loop
-        self._logger.info(f"Terminating BLE Client...")
+        self._logger.info("Terminating BLE Client...")
         self._request_close = True
         force_cancel_time = time() + BLE_CONNECT_THREAD_TIMEOUT
         while time() < force_cancel_time and self._async_thread is not None and self._async_thread.is_alive():
@@ -241,6 +242,11 @@ class MicrocomClientBLE(MicrocomClient):
         return self._ble_client_name is not None
 
     def _receive_thread(self, sender: BleakGATTCharacteristic, data: bytearray):
+        ''' Snycronous code called by async routine, pass this to an async task so we can use await '''
+        loop = asyncio.get_running_loop()
+        loop.create_task(self._receive_thread_async(sender, data))
+
+    async def _receive_thread_async(self, sender: BleakGATTCharacteristic, data:bytearray):
         ''' Process an incoming message from the notify event '''
         self._logger.debug(f"Received RX notify from '{self._ble_client_name}' ({self._ble_client_addr})...") # pyright: ignore[reportOptionalMemberAccess]
         self._logger.debug(f"Received data: {data}")
@@ -250,10 +256,23 @@ class MicrocomClientBLE(MicrocomClient):
                 self._logger.error(f"Received data from '{self._ble_client_name}' ({self._ble_client_addr}) incomplete message!") # pyright: ignore[reportOptionalMemberAccess]
                 return
             received_msg = MicrocomMsg.from_bytes(data=data, source=(self._ble_client_addr,))  # pyright: ignore[reportOptionalMemberAccess]
+
+            # check to make sure the send queue is empty
+            stop_time = time() + self.timeout
+            while self._ble_send_queue is not None and time() < stop_time:
+                await asyncio.sleep(.05)
+
             # send back an ACK
-            with self.__ble_send_lock:
+            if self.__ble_send_lock.locked():
+                self._logger.debug(f"ACK: Waiting for send lock for {received_msg.pkt_id}. Send buffer: {self._ble_send_queue}")
+            async with self.__ble_send_lock:
                 self._logger.debug(f"Sending ACK for message ID: {received_msg.pkt_id}")
-                self._ble_send_queue = {'char_specifier': BLE_GATT_CHAR_RX_READ_UUID, 'data': str(received_msg.pkt_id).encode('utf-8'), 'response': True}
+                with self._send_queue_lock:
+                    self._ble_send_queue = {'char_specifier': BLE_GATT_CHAR_RX_READ_UUID, 'data': str(received_msg.pkt_id).encode('utf-8'), 'response': True}
+                # wait until the send is processed
+                stop_time = time() + self.timeout
+                while self._ble_send_queue is not None and time() < stop_time:
+                    await asyncio.sleep(.05)
             self._logger.debug(f"Received message from '{self._ble_client_name}' ({self._ble_client_addr}): {received_msg}") # pyright: ignore[reportOptionalMemberAccess]
             Thread(target=self._receive_message, args=[received_msg]).start()
         except Exception as e:
@@ -277,55 +296,79 @@ class MicrocomClientBLE(MicrocomClient):
         pass
 
     def send(self, message:MicrocomMsg, wait_for_ack:bool=True, wait_for_reply:bool=False, timeout:None|int=None, retry:None|int=None, data:str|bytes|None=None):
-        ''' Send a message back using the tx service '''
-        if self.is_connected():
+        ''' Snycronous code called by async routine, pass this to an async task so we can use await '''
+        if self.__async_loop is not None:
             timeout = timeout if timeout is not None else self.timeout
             retry = retry if retry is not None else self.retry
             if data is not None:
                 message.data = data # if data was passed to the function, fill it in
 
+            task = self.__async_loop.create_task(self._send_async(message, wait_for_ack, wait_for_reply, timeout, retry, data))
+
+            while not task.done():
+                sleep(.1)
+            
+            self._logger.debug(f"Finished Send Process for {message}")
+
+        else:
+            self._logger.error("Unable to send, client not connected.")
+            raise MicrocomConnectFailed("Unable to send, client not connected.")
+
+    async def _send_async(self, message:MicrocomMsg, wait_for_ack:bool=True, wait_for_reply:bool=False, timeout:None|int=None, retry:None|int=None, data:str|bytes|None=None):
+        ''' Send a message back using the tx service '''
+        if self.is_connected():
             if message.total_length > self.ble_max_write_length:
                 # if we need to fragment, break up the packet and send
                 frag_count = 1
                 fragment = None
                 for fragment in message.frag(self.ble_max_write_length - (message.total_length - message.data_length)): # frag size is max write minus header size
                     self._logger.debug(f"SEND fragment {frag_count} for pkt_id: {fragment.pkt_id} to {fragment.ip} size: {fragment.data_length}")
-                    self.send(fragment, timeout=timeout, retry=retry, wait_for_ack=wait_for_ack, wait_for_reply=wait_for_reply if message.direction != DIR_REPLY_FRAG else False)
+                    await self._send_async(fragment, timeout=timeout, retry=retry, wait_for_ack=True, wait_for_reply=False)
                     if not fragment.ack_received():
                         self._logger.error(f"SEND fragment {frag_count} for pkt_id: {fragment.pkt_id} to {fragment.ip}) failed.")
                         return
+                    # save the send time of the first fragment
+                    if message.send_time == 0:
+                        message.send_time = fragment.send_time
                     frag_count += 1
 
-                # check and see if the message was received
-                while not self._last_sent_message.reply_received() and (time() < (self._last_sent_message.send_time + timeout) or time() < (self._last_sent_message.frag_time + timeout)): # type: ignore
-                    sleep(.1)
+                # if we are expecting a reply, wait for the last fragment to get the reply
+                if fragment and wait_for_reply:
+                    while not fragment.reply_received() and time() < (fragment.send_time + timeout):
+                        await asyncio.sleep(.1)
 
-                if self._last_sent_message.reply_received():
-                    self._logger.debug(f"REPLY received for {self._last_sent_message.pkt_id}")
-                else:
-                    self._logger.error(f"REPLY was NOT received for {self._last_sent_message.pkt_id}")
+                    if fragment.reply_received():
+                        self._logger.debug(f"Fragment reply data: {fragment.reply_msg}, message reply data: {message.reply_msg}, fragment reply: {fragment.reply_time}, message reply: {message.reply_time}")
+                        message.reply_time, message.reply_msg, message.final_msg = fragment.reply_time, fragment.reply_msg, fragment.reply_msg
+                        self._logger.debug(f"Message data: {message.data}, reply data: {message.reply_msg.data}, equal: {message.data == message.reply_msg.data}, reply received: {message.reply_received()}")
+                        self._logger.debug(f"REPLY received for fragmented message {message.pkt_id}")
+                    else:
+                        self._logger.debug(f"Fragment data: {data}, message data: {message.data}")
+                        self._logger.error(f"REPLY was NOT received for fragmented message {message.pkt_id}")
                 return
 
             try:
+                # check to make sure the send queue is empty
+                stop_time = time() + timeout
+                while self._ble_send_queue is not None and time() < stop_time:
+                    await asyncio.sleep(.05)
+
                 if wait_for_ack or wait_for_reply:
                     self._last_sent_message = message
                 message.send_time = time()
 
-                # check to make sure the send queue is empty
-                stop_time = time() + timeout
-                while self._ble_send_queue is not None and time() < stop_time:
-                    sleep(.05)
-
                 # set the write into the buffer so it can be sent by the asyncio thread
-                with self.__ble_send_lock:
+                if self.__ble_send_lock.locked():
+                    self._logger.debug(f"Waiting for send lock for {message.pkt_id}. Send buffer: {self._ble_send_queue}")
+                async with self.__ble_send_lock:
                     header, data, footer = message.serialize()
                     self._logger.debug(f"Sending message to {self._ble_client_name} ({self._ble_client_addr}): {message}")
-                    self._ble_send_queue = {'char_specifier': BLE_GATT_CHAR_TX_UUID, 'data': header + data + footer, 'response': True}
+                    with self._send_queue_lock:
+                        self._ble_send_queue = {'char_specifier': BLE_GATT_CHAR_TX_UUID, 'data': header + data + footer, 'response': True}
                     # wait until the send is processed
                     stop_time = time() + timeout
                     while self._ble_send_queue is not None and time() < stop_time:
-                        sleep(.05)
-
+                        await asyncio.sleep(.05)
             except Exception as e:
                 self._logger.error(f"Error sending message: {message}: {e.__class__.__name__}: {e}")
                 return
@@ -334,15 +377,20 @@ class MicrocomClientBLE(MicrocomClient):
             if not wait_for_ack:
                 return
 
+            # wait for the message to be sent (async)
             while not message.ack_received() and time() < (message.send_time + timeout): # type: ignore
-                sleep(.1)
+                await asyncio.sleep(.05)
             if message.ack_received(): # type: ignore
                 self._logger.debug(f"ACK Received for {message.pkt_id}")
-                if wait_for_ack and not wait_for_reply:
+                if not wait_for_reply:
                     return
                 # if we are waiting for a reply
-                while not message.reply_received() and time() < (message.send_time + timeout): # type: ignore
-                    sleep(.1)
+                last_contact_time = message.send_time
+                while not message.reply_received() and time() < (last_contact_time + timeout): # type: ignore
+                    await asyncio.sleep(.05)
+                    if message.frag_time != 0:
+                        last_contact_time = message.frag_time # upadate last contact to the last frag received
+
                 self._logger.debug(f"REPLY {'received' if message.reply_received() else 'NOT received'} for {message.pkt_id}")
                 return # return regardless of if a reply was received
 
@@ -352,12 +400,13 @@ class MicrocomClientBLE(MicrocomClient):
             if message.retries < retry: # type: ignore
                 # increment the retry counter and call the send function again
                 message.retries += 1 # type: ignore
-                return self.send(message=message, timeout=timeout, retry=retry, wait_for_ack=wait_for_ack, wait_for_reply=wait_for_reply)
+                return await self._send_async(message=message, timeout=timeout, retry=retry, wait_for_ack=wait_for_ack, wait_for_reply=wait_for_reply)
             else:
                 self._logger.error(f"ID: {message.pkt_id} to ({message.ip}:{message.port}), Type: {message.msg_type}, Retry exceeded with no ACK. Message discarded.") # type: ignore
 
+
         else:
-            self._logger.error("Error sending ACK: No BLE server connected!")
+            self._logger.error("Error sending message: No BLE server connected!")
 
 
 
